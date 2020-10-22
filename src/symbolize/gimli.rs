@@ -613,7 +613,18 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
                 });
             }
         }
-
+        if let Some((object_cx, object_addr)) = cx.object.search_object_map(addr as u64) {
+            if let Ok(mut frames) = object_cx.dwarf.find_frames(object_addr) {
+                while let Ok(Some(frame)) = frames.next() {
+                    any_frames = true;
+                    call(Symbol::Frame {
+                        addr: addr as *mut c_void,
+                        location: frame.location,
+                        name: frame.function.map(|f| f.name.slice()),
+                    });
+                }
+            }
+        }
         if !any_frames {
             if let Some(name) = cx.object.search_symtab(addr as u64) {
                 call(Symbol::Symtab {

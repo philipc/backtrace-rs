@@ -142,16 +142,21 @@ pub struct Object<'a> {
     data: Bytes<'a>,
     dwarf: Option<&'a [MachSection]>,
     syms: Vec<(&'a [u8], u64)>,
+    object_map: Option<object::ObjectMap<'a>>,
+    object_mappings: Vec<Option<Option<Mapping>>>,
 }
 
 impl<'a> Object<'a> {
     fn parse(mach: &'a Mach, endian: NativeEndian, data: Bytes<'a>) -> Option<Object<'a>> {
+        let is_object = mach.filetype(endian) == object::macho::MH_OBJECT;
         let mut dwarf = None;
         let mut syms = Vec::new();
         let mut commands = mach.load_commands(endian, data).ok()?;
+        let mut object_map = None;
+        let mut object_mappings = Vec::new();
         while let Ok(Some(command)) = commands.next() {
             if let Some((segment, section_data)) = MachSegment::from_command(command).ok()? {
-                if segment.name() == b"__DWARF" {
+                if segment.name() == b"__DWARF" || (is_object && segment.name() == b"") {
                     dwarf = segment.sections(endian, section_data).ok();
                 }
             } else if let Some(symtab) = command.symtab().ok()? {
@@ -160,7 +165,7 @@ impl<'a> Object<'a> {
                     .iter()
                     .filter_map(|nlist: &MachNlist| {
                         let name = nlist.name(endian, symbols.strings()).ok()?;
-                        if name.len() > 0 && !nlist.is_undefined() {
+                        if name.len() > 0 && nlist.is_definition() {
                             Some((name, u64::from(nlist.n_value(endian))))
                         } else {
                             None
@@ -168,6 +173,11 @@ impl<'a> Object<'a> {
                     })
                     .collect();
                 syms.sort_unstable_by_key(|(_, addr)| *addr);
+                if !is_object {
+                    let map = symbols.object_map(endian);
+                    object_mappings = vec![None; map.objects.len()];
+                    object_map = Some(map);
+                }
             }
         }
 
@@ -176,6 +186,8 @@ impl<'a> Object<'a> {
             data,
             dwarf,
             syms,
+            object_map,
+            object_mappings,
         })
     }
 
@@ -201,4 +213,58 @@ impl<'a> Object<'a> {
         let (sym, _addr) = self.syms.get(i)?;
         Some(sym)
     }
+
+    pub(super) fn search_object_map(&self, addr: u64) -> Option<(&Context<'_>, u64)> {
+        let object_map = self.object_map.as_ref()?;
+        let symbol = object_map.get(addr)?;
+        let object_index = symbol.object_index();
+        let mapping = self.object_mappings.get_mut(object_index)?;
+        if mapping.is_none() {
+            *mapping = Some(object_mapping(object_map.object(object_index)?));
+        }
+        let cx = mapping.as_ref()?;
+        for object_symbol in &cx.object.syms {
+            if object_symbol.0 == symbol.name() {
+                let object_addr = addr
+                    .wrapping_sub(symbol.address())
+                    .wrapping_add(object_symbol.1);
+                return Some((cx, object_addr));
+            }
+        }
+        None
+    }
+}
+
+fn object_mapping(&self, path: &[u8]) -> Option<Mapping> {
+    if let Some((archive_path, member_name)) = split_archive_path(path) {
+        let map = super::mmap(Path::new(archive_path))?;
+        let archive = object::read::archive::ArchiveFile::parse(&map).ok()?;
+        let mut members = archive.members();
+        while let Ok(Some(member)) = members.next() {
+            if member.name() == member_name.as_bytes() {
+                let (macho, data) = find_header(Bytes(member.data()))?;
+                let endian = macho.endian().ok()?;
+                let object = Object::parse(macho, endian, data)?;
+                let stash = Stash::new();
+                let inner = super::cx(&stash, object)?;
+                return Some((mk!(Mapping { map, inner, stash }), object_addr));
+            }
+        }
+    } else {
+        let map = super::mmap(Path::new(path))?;
+        let (macho, data) = find_header(Bytes(&map))?;
+        let endian = macho.endian().ok()?;
+        let object = Object::parse(macho, endian, data)?;
+        let stash = Stash::new();
+        let inner = super::cx(&stash, object)?;
+        return Some((mk!(Mapping { map, inner, stash }), object_addr));
+    }
+    None
+}
+
+fn split_archive_path(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    let index = path.find(b'(')?;
+    let (archive, rest) = path.split_at(index);
+    let member = rest.strip_prefix(b'(')?.strip_suffix(b')')?;
+    Some((archive, member))
 }
