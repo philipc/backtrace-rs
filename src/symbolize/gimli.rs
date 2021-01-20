@@ -244,6 +244,7 @@ cfg_if::cfg_if! {
                 }
                 CStr::from_ptr(name)
             };
+            println!("library {:?}", name);
 
             // Load the image header of this library and delegate to `object` to
             // parse all the load commands so we can figure out all the segments
@@ -308,6 +309,9 @@ cfg_if::cfg_if! {
                     });
                 }
             }
+            for segment in &segments {
+                println!("segment {:x} {:x}", segment.stated_virtual_memory_address, segment.len);
+            }
 
             // Determine the "slide" for this library which ends up being the
             // bias we use to figure out where in memory objects are loaded.
@@ -352,6 +356,7 @@ cfg_if::cfg_if! {
                 slide += adjust;
             }
 
+            println!("bias {:x}", slide);
             Some(Library {
                 name: OsStr::from_bytes(name.to_bytes()).to_owned(),
                 segments,

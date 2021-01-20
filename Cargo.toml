@@ -49,6 +49,7 @@ winapi = { version = "0.3.3", optional = true }
 [dev-dependencies]
 dylib-dep = { path = "crates/dylib-dep" }
 libloading = "0.6"
+core-graphics = "0.22.1"
 
 [features]
 # By default libstd support and gimli-symbolize is used to symbolize addresses.
