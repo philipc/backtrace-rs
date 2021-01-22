@@ -249,7 +249,7 @@ cfg_if::cfg_if! {
             // Load the image header of this library and delegate to `object` to
             // parse all the load commands so we can figure out all the segments
             // involved here.
-            let (mut load_commands, endian) = unsafe {
+            let (mut load_commands, endian, shared_cache) = unsafe {
                 let header = libc::_dyld_get_image_header(i);
                 if header.is_null() {
                     return None;
@@ -258,20 +258,23 @@ cfg_if::cfg_if! {
                     macho::MH_MAGIC => {
                         let endian = NativeEndian;
                         let header = &*(header as *const macho::MachHeader32<NativeEndian>);
+                        let shared_cache = header.flags.get(endian) & 0x8000_0000 != 0;
+                        //let shared_cache = header.flags.get(endian) & macho::MH_DYLIB_IN_CACHE != 0;
                         let data = core::slice::from_raw_parts(
                             header as *const _ as *const u8,
                             mem::size_of_val(header) + header.sizeofcmds.get(endian) as usize
                         );
-                        (header.load_commands(endian, Bytes(data)).ok()?, endian)
+                        (header.load_commands(endian, Bytes(data)).ok()?, endian, shared_cache)
                     }
                     macho::MH_MAGIC_64 => {
                         let endian = NativeEndian;
                         let header = &*(header as *const macho::MachHeader64<NativeEndian>);
+                        let shared_cache = header.flags.get(endian) & 0x8000_0000 != 0;
                         let data = core::slice::from_raw_parts(
                             header as *const _ as *const u8,
                             mem::size_of_val(header) + header.sizeofcmds.get(endian) as usize
                         );
-                        (header.load_commands(endian, Bytes(data)).ok()?, endian)
+                        (header.load_commands(endian, Bytes(data)).ok()?, endian, shared_cache)
                     }
                     _ => return None,
                 }
@@ -282,14 +285,10 @@ cfg_if::cfg_if! {
             // for processing later, see comments below.
             let mut segments = Vec::new();
             let mut first_text = 0;
-            let mut text_fileoff_zero = false;
             while let Some(cmd) = load_commands.next().ok()? {
                 if let Some((seg, _)) = cmd.segment_32().ok()? {
-                    if seg.name() == b"__TEXT" {
+                    if seg.name() == b"__TEXT" || seg.fileoff(endian) == 0 && seg.filesize(endian) > 0 {
                         first_text = segments.len();
-                        if seg.fileoff(endian) == 0 && seg.filesize(endian) > 0 {
-                            text_fileoff_zero = true;
-                        }
                     }
                     segments.push(LibrarySegment {
                         len: seg.vmsize(endian).try_into().ok()?,
@@ -297,11 +296,8 @@ cfg_if::cfg_if! {
                     });
                 }
                 if let Some((seg, _)) = cmd.segment_64().ok()? {
-                    if seg.name() == b"__TEXT" {
+                    if seg.name() == b"__TEXT" || seg.fileoff(endian) == 0 && seg.filesize(endian) > 0 {
                         first_text = segments.len();
-                        if seg.fileoff(endian) == 0 && seg.filesize(endian) > 0 {
-                            text_fileoff_zero = true;
-                        }
                     }
                     segments.push(LibrarySegment {
                         len: seg.vmsize(endian).try_into().ok()?,
@@ -348,8 +344,9 @@ cfg_if::cfg_if! {
             //
             // For some more information see #318
             let mut slide = unsafe { libc::_dyld_get_image_vmaddr_slide(i) as usize };
-            if !text_fileoff_zero {
+            if shared_cache {
                 let adjust = segments[first_text].stated_virtual_memory_address;
+                println!("adjust {:x}", adjust);
                 for segment in segments.iter_mut() {
                     segment.stated_virtual_memory_address -= adjust;
                 }
